@@ -111,23 +111,35 @@ class ManifoldOptimizer:
 
 
 class GradientDescent(ManifoldOptimizer):
-    def __init__(self, manifold: StiefelManifold, c_1=0.25, epsilon=1e-6):
+    def __init__(
+        self,
+        manifold: StiefelManifold,
+        c_1=0.25,
+        epsilon=1e-6,  # direction norm stopping threshold
+        gradient_norm_stop=False,
+    ):
         super().__init__(manifold)
         self.c_1 = c_1
         self.epsilon = epsilon
+        self.gradient_norm_stop = gradient_norm_stop
 
     def optimize(self, start_point, function, max_iter):
         point = start_point
         iter_num = 0
-        function_values = [function(point).item()]
 
         while iter_num < max_iter:
             direction = -self.manifold.project(point, jacrev(function)(point))
+            # Check for nan
+            if torch.isnan(direction).any():
+                print("direction nan stop, returning current point")
+                break
             tk = bp_length(self.manifold, function, self.c_1, 0.9, point, direction)
             point_new = self.manifold.qr_retract(point, direction, t=tk)
-            point = point_new
-            iter_num += 1
-            function_values.append(function(point).item())
+
+            # Check for nan
+            if torch.isnan(point_new).any():
+                print("point nan stop, returning current point")
+                break
 
             self._print_progress(
                 iter_num,
@@ -135,11 +147,14 @@ class GradientDescent(ManifoldOptimizer):
                 torch.norm(direction.flatten(), p=2).item(),
                 tk * torch.norm(direction.flatten(), p=2).item(),
             )
+            point = point_new
+            iter_num += 1
 
-            if torch.norm(direction.flatten(), p=2) < self.epsilon:
-                break
+            if self.gradient_norm_stop:
+                if torch.norm(direction.flatten(), p=2) < self.epsilon:
+                    break
 
-        return point, function_values
+        return point
 
 
 class BBMethod(ManifoldOptimizer):
@@ -151,13 +166,14 @@ class BBMethod(ManifoldOptimizer):
     def __init__(
         self,
         manifold: StiefelManifold,
-        alpha=1,  # Initial step size
-        alpha_max=2,  # Maximum step size
-        alpha_min=0.5,  # Minimum step size
-        rho=0.9,  # Line search parameter
-        c_1=0.25,  # Armijo condition parameter
-        epsilon=1e-6,  # Convergence tolerance
-        M: int = 10,  # Memory parameter
+        alpha=1,
+        alpha_max=2,
+        alpha_min=0.5,
+        rho=0.9,
+        c_1=0.25,
+        epsilon=1e-6,  # direction norm stopping threshold
+        M: int = 10,
+        gradient_norm_stop=False,
     ):
         super().__init__(manifold)
         self.alpha = alpha
@@ -167,6 +183,7 @@ class BBMethod(ManifoldOptimizer):
         self.alpha_min = alpha_min
         self.M = M
         self.rho = rho
+        self.gradient_norm_stop = gradient_norm_stop
         self._validate_params()
 
     def _validate_params(self):
@@ -185,12 +202,17 @@ class BBMethod(ManifoldOptimizer):
         """
         point = start_point
         iter_num = 0
-        function_values = [function(point).item()]
 
         while iter_num < max_iter:
             gradient = self.manifold.project(point, jacrev(function)(point))
-            if torch.norm(gradient.flatten(), p=2) < self.epsilon:
+
+            # Check for nan
+            if torch.isnan(gradient).any():
+                print("gradient nan stop, returning current point")
                 break
+            if self.gradient_norm_stop:
+                if torch.norm(gradient.flatten(), p=2) < self.epsilon:
+                    break
 
             # Compute BB step size
             if iter_num == 0:
@@ -222,20 +244,22 @@ class BBMethod(ManifoldOptimizer):
             )
 
             point_new = self.manifold.qr_retract(point, -gradient, t=alpha)
-            gradient_m1 = gradient
-            point_m1 = point
-            point = point_new
-            iter_num += 1
-            function_values.append(function(point).item())
-
+            # Check for nan
+            if torch.isnan(point_new).any():
+                print("point nan stop, returning current point")
+                break
             self._print_progress(
                 iter_num,
                 function(point).item(),
                 torch.norm(gradient.flatten(), p=2).item(),
                 alpha,
             )
+            gradient_m1 = gradient
+            point_m1 = point
+            point = point_new
+            iter_num += 1
 
-        return point, function_values
+        return point
 
 
 class RegularizedNewton(ManifoldOptimizer):
@@ -249,6 +273,8 @@ class RegularizedNewton(ManifoldOptimizer):
         eta_up=0.7,
         gamma_low=0.9,
         gamma_up=1.1,
+        epsilon=1e-6,  # direction norm stopping threshold
+        gradient_norm_stop=False,
     ):
         super().__init__(manifold)
         self.sigma_0 = sigma_0
@@ -258,7 +284,8 @@ class RegularizedNewton(ManifoldOptimizer):
         self.eta_up = eta_up
         self.gamma_low = gamma_low
         self.gamma_up = gamma_up
-
+        self.epsilon = epsilon
+        self.gradient_norm_stop = gradient_norm_stop
         self._validate_params()
 
     def _validate_params(self):
@@ -283,14 +310,13 @@ class RegularizedNewton(ManifoldOptimizer):
         point = start_point
         sigma_k = self.sigma_0
         iter_num = 0
-        function_values = [function(point).item()]
 
         while iter_num < max_iter:
             direction = compute_direction(
                 point, self.manifold, function, 0.5, 20, sigma_k
             )
             if torch.isnan(direction).any():
-                print("direction is nan")
+                print("direction nan stop, returning current point")
                 break
 
             tk = bp_length(
@@ -316,6 +342,15 @@ class RegularizedNewton(ManifoldOptimizer):
             )
             rho = rho_k_up / rho_k_down
 
+            if rho < self.eta_low:
+                sigma_k = self.gamma_up * sigma_k
+            elif rho > self.eta_up:
+                sigma_k = self.gamma_low * sigma_k
+
+            if torch.isnan(point_new).any():
+                print("nan stop, returning current point")
+                break
+
             self._print_progress(
                 iter_num,
                 function(point).item(),
@@ -323,13 +358,11 @@ class RegularizedNewton(ManifoldOptimizer):
                 tk * torch.norm(direction.flatten(), p=2).item(),
             )
 
-            if rho < self.eta_low:
-                sigma_k = self.gamma_up * sigma_k
-            elif rho > self.eta_up:
-                sigma_k = self.gamma_low * sigma_k
-
             point = point_new if rho >= self.eta_low else point
-            function_values.append(function(point).item())
-            iter_num += 1
 
-        return point, function_values
+            iter_num += 1
+            if self.gradient_norm_stop:
+                if torch.norm(direction.flatten(), p=2) < self.epsilon:
+                    break
+
+        return point
