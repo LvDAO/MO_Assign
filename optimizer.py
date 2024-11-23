@@ -65,11 +65,16 @@ def compute_direction(
 
 def bp_length(manifold, function, c_1, gamma, point, direction, t_init=1):
     tk = t_init
-    while function(manifold.qr_retract(point, direction, t=tk)) > (
-        function(point)
-        + c_1 * tk * (direction.flatten() @ jacrev(function)(point).flatten())
-    ):
+    iter = 0
+    while (
+        function(manifold.qr_retract(point, direction, t=tk))
+        > (
+            function(point)
+            + c_1 * tk * (direction.flatten() @ jacrev(function)(point).flatten())
+        )
+    ) and iter < 1000:
         tk *= gamma
+        iter += 1
     return tk
 
 
@@ -167,8 +172,8 @@ class BBMethod(ManifoldOptimizer):
         self,
         manifold: StiefelManifold,
         alpha=1,
-        alpha_max=2,
-        alpha_min=0.5,
+        alpha_max=4,
+        alpha_min=0.25,
         rho=0.9,
         c_1=0.25,
         epsilon=1e-6,  # direction norm stopping threshold
@@ -315,6 +320,7 @@ class RegularizedNewton(ManifoldOptimizer):
             direction = compute_direction(
                 point, self.manifold, function, 0.5, 20, sigma_k
             )
+            flatten_direction = direction.flatten()
             if torch.isnan(direction).any():
                 print("direction nan stop, returning current point")
                 break
@@ -326,19 +332,16 @@ class RegularizedNewton(ManifoldOptimizer):
 
             rho_k_up = function(point_new) - function(point)
             rho_k_down = (
-                (tk * direction.flatten()) @ jacrev(function)(point).flatten()
+                (tk * flatten_direction) @ jacrev(function)(point).flatten()
                 + 0.5
                 * (
-                    (tk * direction.flatten())
+                    (tk * flatten_direction)
                     @ jacrev(jacrev(function))(point).reshape(
                         point.shape[0] * point.shape[1], point.shape[0] * point.shape[1]
                     )
-                    @ (tk * direction.flatten())
+                    @ (tk * flatten_direction)
                 )
-                + 0.5
-                * sigma_k
-                * (tk * direction.flatten())
-                @ (tk * direction.flatten())
+                + 0.5 * sigma_k * (tk * flatten_direction) @ (tk * flatten_direction)
             )
             rho = rho_k_up / rho_k_down
 
@@ -354,15 +357,15 @@ class RegularizedNewton(ManifoldOptimizer):
             self._print_progress(
                 iter_num,
                 function(point).item(),
-                torch.norm(direction.flatten(), p=2).item(),
-                tk * torch.norm(direction.flatten(), p=2).item(),
+                torch.norm(flatten_direction, p=2).item(),
+                tk * torch.norm(flatten_direction, p=2).item(),
             )
 
             point = point_new if rho >= self.eta_low else point
 
             iter_num += 1
             if self.gradient_norm_stop:
-                if torch.norm(direction.flatten(), p=2) < self.epsilon:
+                if torch.norm(flatten_direction, p=2) < self.epsilon:
                     break
 
         return point

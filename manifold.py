@@ -15,6 +15,24 @@ from functools import wraps
 import numpy as np
 
 
+class Velocity:
+    def __init__(self, gamma):
+        self.gamma = gamma
+        self.call_times = 0
+
+    def __call__(self, t, phase):
+        self.call_times += 1
+        return torch.vstack(
+            [
+                phase[1],
+                torch.einsum("kij,i,j->k", self.gamma(phase[0]), phase[1], phase[1]),
+            ]
+        )
+
+    def empty_cache(self):
+        self.call_times = 0
+
+
 def flatten_if_needed(func):
     """Decorator: Flattens high dimensional tensors if total elements equals dim"""
 
@@ -102,6 +120,7 @@ class Manifold:
         self.dim = dim
         self.metric = metric if metric is not None else Metric(dim)
         self.gamma = self.christoffel_symbols(self.metric)
+        self.velocity = Velocity(self.gamma)
 
     @staticmethod
     def christoffel_symbols(metric: Metric):
@@ -133,52 +152,61 @@ class Manifold:
         return_whole=False,
         return_velocity=False,
     ):
-
+        self.velocity.empty_cache()
         if not geodesics:
             t = torch.tensor([0, 1], dtype=torch.float32, device=x.device)
         else:
             t = torch.linspace(0, 1, time_steps, dtype=torch.float32, device=x.device)
-        velocity = lambda t, phase: torch.vstack(
-            [
-                phase[1],
-                torch.einsum("kij,i,j->k", self.gamma(phase[0]), phase[1], phase[1]),
-            ]
-        )
+
         initial_phase = torch.vstack([x, v])
         if return_whole:
             if return_velocity:
-                return torchdiffeq.odeint(
-                    velocity,
+                result = torchdiffeq.odeint(
+                    self.velocity,
                     initial_phase,
                     t,
                     options={"dtype": torch.float32},
                 )
+                return result
             else:
-                return torchdiffeq.odeint(
-                    velocity,
+                result = torchdiffeq.odeint(
+                    self.velocity,
                     initial_phase,
                     t,
                     options={"dtype": torch.float32},
                 )[:, 0]
+                return result
         else:
             if return_velocity:
-                return torchdiffeq.odeint(
-                    velocity,
+                result = torchdiffeq.odeint(
+                    self.velocity,
                     initial_phase,
                     t,
                     options={"dtype": torch.float32},
                 )[-1]
+                return result
             else:
-                return torchdiffeq.odeint(
-                    velocity,
+                result = torchdiffeq.odeint(
+                    self.velocity,
                     initial_phase,
                     t,
                     options={"dtype": torch.float32},
                 )[-1, 0]
+                return result
 
 
 class StiefelManifold(Manifold):
     def __init__(self, rdim, kdim):
+
+        class StiefelVelocity(Velocity):
+            def __init__(self, gamma):
+                super(StiefelVelocity, self).__init__(gamma)
+
+            def __call__(self, t, state):
+                self.call_times += 1
+                dxdt = state[1]
+                dvdt = -state[0] @ state[1].T @ state[1]
+                return torch.stack([dxdt, dvdt])
 
         super(StiefelManifold, self).__init__(
             rdim * kdim,
@@ -186,6 +214,7 @@ class StiefelManifold(Manifold):
         self.rdim = rdim
         self.kdim = kdim
         self.inner_dim = rdim * kdim - (kdim * (kdim + 1) // 2)
+        self.velocity = StiefelVelocity(self.gamma)
 
     def project(self, x, v):
         """
@@ -210,46 +239,28 @@ class StiefelManifold(Manifold):
         return proj
 
     def exponential_map(self, x, v):
+        self.velocity.empty_cache()
         state = torch.stack([x, v])
-
-        def velocity(t, input):
-            dxdt = input[1]
-            dvdt = -input[0] @ input[1].T @ input[1]
-            return torch.stack([dxdt, dvdt])
-
         return torchdiffeq.odeint(
-            velocity, state, torch.tensor([0, 1], dtype=torch.float64, device=x.device)
+            self.velocity,
+            state,
+            torch.tensor([0, 1], dtype=torch.float64, device=x.device),
         )[-1][0]
 
-    def svd_retract(self, x, v):
-        u, s, vh = torch.svd(x + v)
+    def svd_retract(self, x, v, t=1):
+        u, s, vh = torch.svd(x + t * v)
         return u @ vh.T
 
     def qr_retract(self, x, v, t=1):
         Y = x + t * v
-        Q = torch.zeros_like(Y, device=x.device)
-        R = torch.zeros((self.kdim, self.kdim), device=x.device)
-        # Initialize first column
-        v = Y[:, 0].clone()
-        R[0, 0] = torch.norm(v)
-        Q[:, 0] = v / R[0, 0]
+        q, r = torch.linalg.qr(Y)
 
-        # Optimize subsequent column calculations using matrix operations
-        for i in range(1, self.kdim):
-            v = Y[:, i].clone()
-            # Calculate projection coefficients for first i columns at once
-            R[:i, i] = Q[:, :i].T @ v
-            # Subtract all projection components from v
-            v = v - Q[:, :i] @ R[:i, i]
+        # 确保R的对角元为正
+        diag_signs = torch.sign(torch.diag(r))
+        q = q * diag_signs.unsqueeze(0)
+        r = r * diag_signs.unsqueeze(0)
 
-            # Calculate norm of i-th column and normalize
-            R[i, i] = torch.norm(v)
-            if R[i, i] > 1e-10:
-                Q[:, i] = v / R[i, i]
-            else:
-                Q[:, i] = torch.zeros_like(v)
-
-        return Q
+        return q
 
     def cayley_retract(self, x, v, t=1):
         WX = torch.eye(self.rdim, device=x.device) - x @ x.T

@@ -4,21 +4,21 @@ from manifold import *
 import torch
 import matplotlib.pyplot as plt
 
-# Set random seed for reproducibility
-torch.manual_seed(42)
-
-
 # Initialize parameters
 rdim = 1000
-kdim = 10
+kdim = 5
 max_iter = 200
 
 eye_mat = torch.eye(rdim)[:, :kdim]
+symmetric_mat = torch.randn(rdim, rdim)
+symmetric_mat = (symmetric_mat + symmetric_mat.T) / 2
+
+G = torch.randn(rdim, kdim)
 
 
 # Create a simple test function
 def test_function(x):
-    return torch.norm(x - eye_mat, p=4) ** 4
+    return torch.trace(x.T @ symmetric_mat @ x) + 2 * torch.trace(x.T @ G)
 
 
 # Create Stiefel manifold
@@ -47,17 +47,27 @@ print(f"Final function value: {test_function(result_rn):.10f}")
 
 # Plot convergence curves
 plt.figure(figsize=(10, 6))
-plt.semilogy(
-    gd.log_data["iteration"], gd.log_data["function_value"], label="Gradient Descent"
-)
-plt.semilogy(bb.log_data["iteration"], bb.log_data["function_value"], label="BB Method")
-plt.semilogy(
-    rn.log_data["iteration"], rn.log_data["function_value"], label="Regularized Newton"
-)
+
+# 获取所有函数值
+gd_values = gd.log_data["function_value"]
+bb_values = bb.log_data["function_value"]
+rn_values = rn.log_data["function_value"]
+
+# 计算所有数据中的最小值
+min_value = min(min(gd_values), min(bb_values), min(rn_values))
+
+# 对数据进行处理：减去最小值后取对数
+gd_processed = torch.log(torch.tensor(gd_values) - min_value + 1e-10)
+bb_processed = torch.log(torch.tensor(bb_values) - min_value + 1e-10)
+rn_processed = torch.log(torch.tensor(rn_values) - min_value + 1e-10)
+
+plt.plot(gd.log_data["iteration"], gd_processed, label="Gradient Descent")
+plt.plot(bb.log_data["iteration"], bb_processed, label="BB Method")
+plt.plot(rn.log_data["iteration"], rn_processed, label="Regularized Newton")
 plt.xlabel("Iterations")
-plt.ylabel("Function Value (log scale)")
+plt.ylabel("Log(Function Value - Minimum)")
 plt.title("Optimization Methods Convergence Comparison")
 plt.legend()
 plt.grid(True)
-plt.savefig('optimization_comparison.png')
+plt.savefig("optimization_comparison.png")
 plt.close()
