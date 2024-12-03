@@ -369,3 +369,91 @@ class RegularizedNewton(ManifoldOptimizer):
                     break
 
         return point
+
+
+class AdaptiveRegularizedNewtonTrust(ManifoldOptimizer):
+    def __init__(
+        self,
+        manifold: StiefelManifold,
+        sigma_0=0.1,
+        eta_low=0.25,
+        eta_up=0.75,
+        gamma_low=0.9,
+        gamma_up=1.1,
+        max_cg_iter=20,
+        epsilon=1e-6,
+        gradient_norm_stop=False,
+    ):
+        super().__init__(manifold)
+        self.sigma_0 = sigma_0
+        self.eta_low = eta_low
+        self.eta_up = eta_up
+        self.gamma_low = gamma_low
+        self.gamma_up = gamma_up
+        self.max_cg_iter = max_cg_iter
+        self.epsilon = epsilon
+        self.gradient_norm_stop = gradient_norm_stop
+
+    def optimize(self, start_point, function, max_iter):
+        point = start_point
+        sigma_k = self.sigma_0
+        iter_num = 0
+
+        while iter_num < max_iter:
+            # 求解方向
+            direction = compute_direction(
+                point, self.manifold, function, 0.5, self.max_cg_iter, sigma_k
+            )
+            flatten_direction = direction.flatten()
+            if torch.isnan(direction).any():
+                print("direction nan stop, returning current point")
+                break
+
+            # 计算步长
+            tk = bp_length(self.manifold, function, 0.25, 0.9, point, direction)
+
+            # 更新点
+            point_new = self.manifold.qr_retract(point, direction, t=tk)
+
+            # 计算ρ_k比率
+            rho_k_up = function(point_new) - function(point)
+            rho_k_down = (
+                (tk * flatten_direction) @ jacrev(function)(point).flatten()
+                + 0.5
+                * (
+                    (tk * flatten_direction)
+                    @ jacrev(jacrev(function))(point).reshape(
+                        point.shape[0] * point.shape[1], point.shape[0] * point.shape[1]
+                    )
+                    @ (tk * flatten_direction)
+                )
+                + 0.5 * sigma_k * (tk * flatten_direction) @ (tk * flatten_direction)
+            )
+            rho = rho_k_up / rho_k_down
+
+            # 更新正则化参数
+            if rho < self.eta_low:
+                sigma_k *= self.gamma_up
+            elif rho > self.eta_up:
+                sigma_k *= self.gamma_low
+
+            # 打印进度
+            self._print_progress(
+                iter_num,
+                function(point).item(),
+                torch.norm(flatten_direction, p=2).item(),
+                tk * torch.norm(flatten_direction, p=2).item(),
+            )
+
+            # 更新迭代点
+            point = point_new if rho >= self.eta_low else point
+
+            iter_num += 1
+
+            if (
+                self.gradient_norm_stop
+                and torch.norm(flatten_direction, p=2) < self.epsilon
+            ):
+                break
+
+        return point

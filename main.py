@@ -45,6 +45,12 @@ rn = RegularizedNewton(manifold)
 result_rn = rn.optimize(start_point, test_function, max_iter)
 print(f"Final function value: {test_function(result_rn):.10f}")
 
+# Test adaptive regularized Newton trust method
+print("\nTesting Adaptive Regularized Newton Trust Method:")
+arnt = AdaptiveRegularizedNewtonTrust(manifold)
+result_arnt = arnt.optimize(start_point, test_function, max_iter)
+print(f"Final function value: {test_function(result_arnt):.10f}")
+
 # Plot convergence curves
 plt.figure(figsize=(10, 6))
 
@@ -52,18 +58,25 @@ plt.figure(figsize=(10, 6))
 gd_values = gd.log_data["function_value"]
 bb_values = bb.log_data["function_value"]
 rn_values = rn.log_data["function_value"]
+arnt_values = arnt.log_data["function_value"]
 
 # 计算所有数据中的最小值
-min_value = min(min(gd_values), min(bb_values), min(rn_values))
+min_value = min(min(gd_values), min(bb_values), min(rn_values), min(arnt_values))
 
 # 对数据进行处理：减去最小值后取对数
 gd_processed = torch.log(torch.tensor(gd_values) - min_value + 1e-10)
 bb_processed = torch.log(torch.tensor(bb_values) - min_value + 1e-10)
 rn_processed = torch.log(torch.tensor(rn_values) - min_value + 1e-10)
+arnt_processed = torch.log(torch.tensor(arnt_values) - min_value + 1e-10)
 
 plt.plot(gd.log_data["iteration"], gd_processed, label="Gradient Descent")
 plt.plot(bb.log_data["iteration"], bb_processed, label="BB Method")
 plt.plot(rn.log_data["iteration"], rn_processed, label="Regularized Newton")
+plt.plot(
+    arnt.log_data["iteration"],
+    arnt_processed,
+    label="Adaptive Regularized Newton Trust",
+)
 plt.xlabel("Iterations")
 plt.ylabel("Log(Function Value - Minimum)")
 plt.title("Optimization Methods Convergence Comparison")
